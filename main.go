@@ -90,8 +90,16 @@ func handleProxyConnection(clientConnection net.Conn, config Configuration) {
 	}
 	fmt.Fprintf(os.Stdout, "[+] Connection established to: %s\n", clientConnection.RemoteAddr())
 
-	go io.Copy(targetConnection, clientConnection)
-	io.Copy(clientConnection, targetConnection)
+	go func() {
+		_, err := io.Copy(targetConnection, clientConnection)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[-] Failed to copy data from client to target: %s\n", err.Error())
+		}
+	}()
+	_, err = io.Copy(clientConnection, targetConnection)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[-] Failed to copy data from target to client: %s\n", err.Error())
+	}
 }
 
 func startProxy(config Configuration) {

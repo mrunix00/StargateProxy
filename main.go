@@ -12,8 +12,6 @@ import (
 type Configuration struct {
 	listenHostname string
 	listenPort     string
-	targetHostname string
-	targetPort     string
 }
 
 type SPError struct {
@@ -28,26 +26,12 @@ func getConfiguration() (*Configuration, error) {
 	var config Configuration
 	config.listenHostname = os.Getenv("SP_HOSTNAME")
 	config.listenPort = os.Getenv("SP_PORT")
-	config.targetHostname = os.Getenv("SP_TARGET_HOSTNAME")
-	config.targetPort = os.Getenv("SP_TARGET_PORT")
 
-	if len(config.targetHostname) == 0 {
-		return nil, SPError{"SP_HOSTNAME environment variable is not set!"}
-	}
 	if len(config.listenPort) == 0 {
 		return nil, SPError{"SP_PORT environment variable is not set!"}
 	}
 	if portInt, err := strconv.Atoi(config.listenPort); err != nil || portInt > 65535 {
 		return nil, SPError{"SP_PORT is not a valid port number!"}
-	}
-	if len(config.targetHostname) == 0 {
-		return nil, SPError{"SP_TARGET_HOSTNAME environment variable is not set!"}
-	}
-	if len(config.targetPort) == 0 {
-		return nil, SPError{"SP_TARGET_PORT environment variable is not set!"}
-	}
-	if portInt, err := strconv.Atoi(config.targetPort); err != nil || portInt > 65535 {
-		return nil, SPError{"SP_TARGET_PORT is not a valid port number!"}
 	}
 
 	return &config, nil
@@ -56,15 +40,15 @@ func getConfiguration() (*Configuration, error) {
 func handleProxyConnection(clientConnection net.Conn, config Configuration) {
 	buffer := make([]byte, 4096)
 	defer clientConnection.Close()
-	log.Println("Received connection from: ", clientConnection.RemoteAddr())
+	log.Println("[*] Received connection from: ", clientConnection.RemoteAddr())
 	nOfBytes, err := clientConnection.Read(buffer)
 	if err != nil {
 		log.Print("[-] Failed to read from client: ", err.Error())
 		return
 	}
 
-	var method, host, port string
-	_, err = fmt.Sscanf(string(buffer[:nOfBytes]), "%s%s%s", &method, &host, &port)
+	var method, host, httpProtocol string
+	_, err = fmt.Sscanf(string(buffer[:nOfBytes]), "%s%s%s", &method, &host, &httpProtocol)
 	if err != nil {
 		clientConnection.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		log.Print("[-] Failed to parse request: ", err.Error())
@@ -76,7 +60,7 @@ func handleProxyConnection(clientConnection net.Conn, config Configuration) {
 		return
 	}
 
-	targetConnection, err := net.Dial("tcp", net.JoinHostPort(config.targetHostname, config.targetPort))
+	targetConnection, err := net.Dial("tcp", host)
 	if err != nil {
 		clientConnection.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		log.Print("[-] Failed to connect to target: ", err.Error())

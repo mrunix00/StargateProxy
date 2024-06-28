@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -55,10 +56,10 @@ func getConfiguration() (*Configuration, error) {
 func handleProxyConnection(clientConnection net.Conn, config Configuration) {
 	buffer := make([]byte, 4096)
 	defer clientConnection.Close()
-	fmt.Fprintf(os.Stdout, "[*] Received connection from: %s\n", clientConnection.RemoteAddr())
+	log.Println("Received connection from: ", clientConnection.RemoteAddr())
 	nOfBytes, err := clientConnection.Read(buffer)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[-] Failed to read from client: %s\n", err.Error())
+		log.Print("[-] Failed to read from client: ", err.Error())
 		return
 	}
 
@@ -66,64 +67,64 @@ func handleProxyConnection(clientConnection net.Conn, config Configuration) {
 	_, err = fmt.Sscanf(string(buffer[:nOfBytes]), "%s%s%s", &method, &host, &port)
 	if err != nil {
 		clientConnection.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
-		fmt.Fprintf(os.Stderr, "[-] Failed to parse request: %s\n", err.Error())
+		log.Print("[-] Failed to parse request: ", err.Error())
 		return
 	}
 	if method != "CONNECT" {
 		clientConnection.Write([]byte("HTTP/1.1 405 Method Not Allowed\r\n\r\n"))
-		fmt.Fprintf(os.Stderr, "[-] Method not allowed: %s\n", method)
+		log.Print("[-] Method not allowed: ", method)
 		return
 	}
 
 	targetConnection, err := net.Dial("tcp", net.JoinHostPort(config.targetHostname, config.targetPort))
 	if err != nil {
 		clientConnection.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		fmt.Fprintf(os.Stderr, "[-] Failed to connect to target: %s\n", err.Error())
+		log.Print("[-] Failed to connect to target: ", err.Error())
 		return
 	}
 	defer targetConnection.Close()
 
 	_, err = clientConnection.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[-] Failed to write to client: %s\n", err.Error())
+		log.Fatalln("[-] Failed to write to client: ", err.Error())
 		return
 	}
-	fmt.Fprintf(os.Stdout, "[+] Connection established to: %s\n", clientConnection.RemoteAddr())
+	log.Println("[+] Connection established to: ", clientConnection.RemoteAddr())
 
 	go func() {
 		_, err := io.Copy(targetConnection, clientConnection)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[-] Failed to copy data from client to target: %s\n", err.Error())
+			log.Println("[-] Failed to copy data from client to target: ", err.Error())
 		}
 	}()
 	_, err = io.Copy(clientConnection, targetConnection)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[-] Failed to copy data from target to client: %s\n", err.Error())
+		log.Println("[-] Failed to copy data from target to client: ", err.Error())
 	}
 }
 
 func startProxy(config Configuration) {
-	fmt.Println("[*] Starting proxy...")
+	log.Println("[*] Starting proxy...")
 	listeningAddr := net.JoinHostPort(config.listenHostname, config.listenPort)
 	listener, err := net.Listen("tcp", listeningAddr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[-] Listening error: %s\n", err.Error())
+		log.Println("[-] Listening error: ", err.Error())
 		os.Exit(1)
 	}
 	defer func(listener net.Listener) {
 		err := listener.Close()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[-] Closing listener failure: %s\n", err.Error())
+			log.Println("[-] Closing listener failure: ", err.Error())
 			os.Exit(1)
 		}
 	}(listener)
 
-	fmt.Fprintf(os.Stdout, "[+] Listening on: %s\n", listeningAddr)
+	log.Println("[+] Listening on: ", listeningAddr)
 
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[-] Accepting connection failure: %s\n", err.Error())
+			log.Println("[-] Accepting connection failure: ", err.Error())
 		}
 
 		go handleProxyConnection(connection, config)
@@ -133,8 +134,7 @@ func startProxy(config Configuration) {
 func main() {
 	config, err := getConfiguration()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[-] Configuration error: %s\n", err.Error())
-		os.Exit(1)
+		log.Fatalln("[-] Configuration error: ", err.Error())
 	}
 
 	startProxy(*config)

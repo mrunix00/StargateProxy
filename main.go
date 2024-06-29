@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"github.com/redis/go-redis/v9"
 	"io"
 	"log"
 	"net"
@@ -78,7 +80,7 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 	forwardData(srcConn, destConn)
 }
 
-func handleHttp(w http.ResponseWriter, req *http.Request) {
+func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context) {
 	transport := http.DefaultTransport
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
@@ -91,12 +93,26 @@ func handleHttp(w http.ResponseWriter, req *http.Request) {
 			log.Println("[-] Failed closing response body:", err.Error())
 		}
 	}(resp.Body)
+
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, err = io.Copy(w, resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Println("[-] Failed reading response body:", err.Error())
+		return
+	}
+
+	_, err = w.Write(body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		log.Println("[-] Failed copying response body:", err.Error())
+		return
+	}
+
+	err = rdb.Set(ctx, req.Method+":"+req.Host+":"+req.URL.Path, body, 0).Err()
+	if err != nil {
+		log.Println("[-] Failed caching response body:", err.Error())
 	}
 }
 
@@ -110,6 +126,12 @@ func copyHeader(dst, src http.Header) {
 
 func startProxy(config Configuration) {
 	hostAddr := net.JoinHostPort(config.listenHostname, config.listenPort)
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
+	ctx := context.Background()
 	server := http.Server{
 		Addr: hostAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +139,18 @@ func startProxy(config Configuration) {
 			if r.Method == http.MethodConnect {
 				handleHttpsTunneling(w, r)
 			} else {
-				handleHttp(w, r)
+				val, err := rdb.Get(ctx, r.Method+":"+r.Host+":"+r.URL.Path).Result()
+				if err != nil {
+					handleHttp(w, r, rdb, ctx)
+				} else {
+					log.Println("[*] Cache hit for: ", r.Method+":"+r.Host+":"+r.URL.Path)
+					w.WriteHeader(http.StatusOK)
+					_, err := w.Write([]byte(val))
+					if err != nil {
+						log.Println("[-] Failed writing cached response:", err.Error())
+					}
+					return
+				}
 			}
 		}),
 		TLSConfig: nil,

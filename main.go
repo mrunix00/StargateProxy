@@ -1,10 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 )
@@ -37,81 +37,64 @@ func getConfiguration() (*Configuration, error) {
 	return &config, nil
 }
 
-func handleProxyConnection(clientConnection net.Conn, config Configuration) {
-	buffer := make([]byte, 4096)
-	defer clientConnection.Close()
-	log.Println("[*] Received connection from: ", clientConnection.RemoteAddr())
-	nOfBytes, err := clientConnection.Read(buffer)
+func forwardData(dst, src net.Conn) {
+	_, err := io.Copy(dst, src)
 	if err != nil {
-		log.Print("[-] Failed to read from client: ", err.Error())
-		return
-	}
-
-	var method, host, httpProtocol string
-	_, err = fmt.Sscanf(string(buffer[:nOfBytes]), "%s%s%s", &method, &host, &httpProtocol)
-	if err != nil {
-		clientConnection.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
-		log.Print("[-] Failed to parse request: ", err.Error())
-		return
-	}
-	if method != "CONNECT" {
-		clientConnection.Write([]byte("HTTP/1.1 405 Method Not Allowed\r\n\r\n"))
-		log.Print("[-] Method not allowed: ", method)
-		return
-	}
-
-	targetConnection, err := net.Dial("tcp", host)
-	if err != nil {
-		clientConnection.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
-		log.Print("[-] Failed to connect to target: ", err.Error())
-		return
-	}
-	defer targetConnection.Close()
-
-	_, err = clientConnection.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	if err != nil {
-		log.Fatalln("[-] Failed to write to client: ", err.Error())
-		return
-	}
-	log.Println("[+] Connection established to: ", clientConnection.RemoteAddr())
-
-	go func() {
-		_, err := io.Copy(targetConnection, clientConnection)
-		if err != nil {
-			log.Println("[-] Failed to copy data from client to target: ", err.Error())
-		}
-	}()
-	_, err = io.Copy(clientConnection, targetConnection)
-	if err != nil {
-		log.Println("[-] Failed to copy data from target to client: ", err.Error())
+		log.Println("[-] Forwarding data failure: ", err.Error())
 	}
 }
 
-func startProxy(config Configuration) {
-	log.Println("[*] Starting proxy...")
-	listeningAddr := net.JoinHostPort(config.listenHostname, config.listenPort)
-	listener, err := net.Listen("tcp", listeningAddr)
-	if err != nil {
-		log.Println("[-] Listening error: ", err.Error())
-		os.Exit(1)
+func handleConnection(w http.ResponseWriter, r *http.Request) {
+	log.Println("[*] Received connection from:", r.RemoteAddr)
+	if r.Method != http.MethodConnect {
+		http.Error(w, "HTTP/1.1 405 Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	defer func(listener net.Listener) {
-		err := listener.Close()
-		if err != nil {
-			log.Println("[-] Closing listener failure: ", err.Error())
-			os.Exit(1)
+
+	destConn, err := net.Dial("tcp", r.Host)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		log.Println("[-]", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	defer func(destConn net.Conn) {
+		if err := destConn.Close(); err != nil {
+			log.Println("[-] Failed closing destination connection:", err.Error())
 		}
-	}(listener)
+	}(destConn)
 
-	log.Println("[+] Listening on: ", listeningAddr)
+	hijacker, allowed := w.(http.Hijacker)
+	if !allowed {
+		http.Error(w, "HTTP/1.1 400 Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 
-	for {
-		connection, err := listener.Accept()
-		if err != nil {
-			log.Println("[-] Accepting connection failure: ", err.Error())
+	srcConn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	}
+	defer func(srcConn net.Conn) {
+		if err := srcConn.Close(); err != nil {
+			log.Println("[-] Failed closing client connection:", err.Error())
 		}
+	}(srcConn)
 
-		go handleProxyConnection(connection, config)
+	go forwardData(destConn, srcConn)
+	forwardData(srcConn, destConn)
+}
+
+func startProxy(config Configuration) {
+	hostAddr := net.JoinHostPort(config.listenHostname, config.listenPort)
+	server := http.Server{
+		Addr:      hostAddr,
+		Handler:   http.HandlerFunc(handleConnection),
+		TLSConfig: nil,
+	}
+	log.Println("[*] Listening on: ", hostAddr)
+	err := server.ListenAndServe()
+	if err != nil {
+		log.Fatalln("[-] Cannot listen on ", hostAddr, " : ", err.Error())
 	}
 }
 

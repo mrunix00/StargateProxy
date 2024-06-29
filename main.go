@@ -44,13 +44,7 @@ func forwardData(dst, src net.Conn) {
 	}
 }
 
-func handleConnection(w http.ResponseWriter, r *http.Request) {
-	log.Println("[*] Received connection from:", r.RemoteAddr)
-	if r.Method != http.MethodConnect {
-		http.Error(w, "HTTP/1.1 405 Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 	destConn, err := net.Dial("tcp", r.Host)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -84,11 +78,48 @@ func handleConnection(w http.ResponseWriter, r *http.Request) {
 	forwardData(srcConn, destConn)
 }
 
+func handleHttp(w http.ResponseWriter, req *http.Request) {
+	transport := http.DefaultTransport
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer func(Body io.ReadCloser) {
+		err := Body.Close()
+		if err != nil {
+			log.Println("[-] Failed closing response body:", err.Error())
+		}
+	}(resp.Body)
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		log.Println("[-] Failed copying response body:", err.Error())
+	}
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
 func startProxy(config Configuration) {
 	hostAddr := net.JoinHostPort(config.listenHostname, config.listenPort)
 	server := http.Server{
-		Addr:      hostAddr,
-		Handler:   http.HandlerFunc(handleConnection),
+		Addr: hostAddr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			log.Println("[*] Received connection from:", r.RemoteAddr)
+			if r.Method == http.MethodConnect {
+				handleHttpsTunneling(w, r)
+			} else {
+				handleHttp(w, r)
+			}
+		}),
 		TLSConfig: nil,
 	}
 	log.Println("[*] Listening on: ", hostAddr)

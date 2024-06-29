@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"fmt"
 	"github.com/redis/go-redis/v9"
 	"io"
 	"log"
@@ -9,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Configuration struct {
@@ -109,6 +113,73 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 	forwardData(srcConn, destConn)
 }
 
+type CachedResponse struct {
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
+}
+
+func parseHeaders(headerBytes []byte) http.Header {
+	headers := http.Header{}
+	scanner := bufio.NewScanner(bytes.NewReader(headerBytes))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			headers.Add(key, value)
+		}
+	}
+	return headers
+}
+
+func (cachedResponse CachedResponse) MarshalBinary() ([]byte, error) {
+	var buffer bytes.Buffer
+	buffer.WriteString(fmt.Sprintf("HTTP/1.1 %d\r\n", cachedResponse.StatusCode))
+	for key, values := range cachedResponse.Headers {
+		for _, value := range values {
+			buffer.WriteString(fmt.Sprintf("%s: %s\r\n", key, value))
+		}
+	}
+	buffer.WriteString("\r\n") // Separate headers from body
+	buffer.Write(cachedResponse.Body)
+	return buffer.Bytes(), nil
+}
+
+func bytesToCachedResponse(data []byte) (CachedResponse, error) {
+	// Split headers and body
+	parts := bytes.SplitN(data, []byte("\r\n\r\n"), 2)
+	if len(parts) != 2 {
+		return CachedResponse{}, fmt.Errorf("invalid format")
+	}
+
+	// Split status line and headers
+	headerParts := bytes.SplitN(parts[0], []byte("\r\n"), 2)
+	if len(headerParts) != 2 {
+		return CachedResponse{}, fmt.Errorf("invalid header format")
+	}
+
+	// Parse status line
+	statusLine := string(headerParts[0])
+	statusFields := strings.Fields(statusLine)
+	if len(statusFields) < 2 {
+		return CachedResponse{}, fmt.Errorf("invalid status line")
+	}
+	statusCode, err := strconv.Atoi(statusFields[1])
+	if err != nil {
+		return CachedResponse{}, fmt.Errorf("invalid status code")
+	}
+
+	headers := parseHeaders(headerParts[1])
+	body := parts[1]
+	return CachedResponse{
+		StatusCode: statusCode,
+		Headers:    headers,
+		Body:       body,
+	}, nil
+}
+
 func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context) {
 	transport := http.DefaultTransport
 	resp, err := transport.RoundTrip(req)
@@ -119,7 +190,7 @@ func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx
 	defer func(Body io.ReadCloser) {
 		err := Body.Close()
 		if err != nil {
-			log.Println("[-] Failed closing response body:", err.Error())
+			log.Println("[-] Failed closing response Body:", err.Error())
 		}
 	}(resp.Body)
 
@@ -128,20 +199,44 @@ func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Println("[-] Failed reading response body:", err.Error())
+		log.Println("[-] Failed reading response Body:", err.Error())
 		return
 	}
 
 	_, err = w.Write(body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		log.Println("[-] Failed copying response body:", err.Error())
+		log.Println("[-] Failed copying response Body:", err.Error())
 		return
 	}
 
-	err = rdb.Set(ctx, req.Method+":"+req.Host+":"+req.URL.Path, body, 0).Err()
+	err = rdb.Set(
+		ctx,
+		req.Method+":"+req.Host+":"+req.URL.Path,
+		CachedResponse{resp.StatusCode, w.Header(), body},
+		0).Err()
 	if err != nil {
-		log.Println("[-] Failed caching response body:", err.Error())
+		log.Println("[-] Failed caching response Body:", err.Error())
+	}
+}
+
+func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context) {
+	val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
+	if err != nil {
+		handleHttp(w, req, rdb, ctx)
+		return
+	}
+	response, err := bytesToCachedResponse([]byte(val))
+	if err != nil {
+		log.Println("[-] Failed to parse cached response:", err.Error())
+		handleHttp(w, req, rdb, ctx)
+		return
+	}
+	copyHeader(w.Header(), response.Headers)
+	w.WriteHeader(response.StatusCode)
+	_, err = w.Write(response.Body)
+	if err != nil {
+		log.Println("[-] Failed writing cached response:", err.Error())
 	}
 }
 
@@ -166,21 +261,10 @@ func startProxy(config Configuration) {
 		Addr: hostAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Println("[*] Received connection from:", r.RemoteAddr)
-			if r.Method == http.MethodConnect {
+			if http.MethodConnect == r.Method {
 				handleHttpsTunneling(w, r)
 			} else {
-				val, err := rdb.Get(ctx, r.Method+":"+r.Host+":"+r.URL.Path).Result()
-				if err != nil {
-					handleHttp(w, r, rdb, ctx)
-				} else {
-					log.Println("[*] Cache hit for: ", r.Method+":"+r.Host+":"+r.URL.Path)
-					w.WriteHeader(http.StatusOK)
-					_, err := w.Write([]byte(val))
-					if err != nil {
-						log.Println("[-] Failed writing cached response:", err.Error())
-					}
-					return
-				}
+				handleCachedHttp(w, r, rdb, ctx)
 			}
 		}),
 		TLSConfig: nil,

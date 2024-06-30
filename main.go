@@ -9,6 +9,8 @@ import (
 	"net/http"
 )
 
+var ctx = context.Background()
+
 func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 	log.Println("[*] Tunneling to:", r.Host)
 	destConn, err := net.Dial("tcp", r.Host)
@@ -44,7 +46,7 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 	forwardData(srcConn, destConn)
 }
 
-func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context, config Configuration) {
+func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, config Configuration) {
 	log.Println("[*] Fetching from upstream:", req.URL)
 	transport := http.DefaultTransport
 	resp, err := transport.RoundTrip(req)
@@ -85,18 +87,18 @@ func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx
 	}
 }
 
-func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context, config Configuration) {
+func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, config Configuration) {
 	val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
 	if err != nil {
 		log.Println("[-] Cache miss:", err.Error())
-		handleHttp(w, req, rdb, ctx, config)
+		handleHttp(w, req, rdb, config)
 		return
 	}
 	log.Println("[*] Cache hit:", req.URL)
 	response, err := bytesToCachedResponse([]byte(val))
 	if err != nil {
 		log.Println("[-] Failed to parse cached response:", err.Error())
-		handleHttp(w, req, rdb, ctx, config)
+		handleHttp(w, req, rdb, config)
 		return
 	}
 	copyHeader(w.Header(), response.Headers)
@@ -115,7 +117,6 @@ func startProxy(config Configuration) {
 		Password: config.redisPassword,
 		DB:       config.redisDB,
 	})
-	ctx := context.Background()
 	server := http.Server{
 		Addr: hostAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,10 +126,10 @@ func startProxy(config Configuration) {
 				handleHttpsTunneling(w, r)
 				return
 			case http.MethodGet:
-				handleCachedHttp(w, r, rdb, ctx, config)
+				handleCachedHttp(w, r, rdb, config)
 				return
 			default:
-				handleHttp(w, r, rdb, ctx, config)
+				handleHttp(w, r, rdb, config)
 			}
 		}),
 		TLSConfig: nil,

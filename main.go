@@ -10,6 +10,7 @@ import (
 )
 
 func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
+	log.Println("[*] Tunneling to:", r.Host)
 	destConn, err := net.Dial("tcp", r.Host)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -44,6 +45,7 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context, config Configuration) {
+	log.Println("[*] Fetching from upstream:", req.URL)
 	transport := http.DefaultTransport
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
@@ -86,9 +88,11 @@ func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx
 func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context, config Configuration) {
 	val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
 	if err != nil {
+		log.Println("[-] Cache miss:", err.Error())
 		handleHttp(w, req, rdb, ctx, config)
 		return
 	}
+	log.Println("[*] Cache hit:", req.URL)
 	response, err := bytesToCachedResponse([]byte(val))
 	if err != nil {
 		log.Println("[-] Failed to parse cached response:", err.Error())

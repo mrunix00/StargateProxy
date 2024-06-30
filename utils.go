@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func getConfiguration() (*Configuration, error) {
@@ -47,6 +48,15 @@ func getConfiguration() (*Configuration, error) {
 		config.redisDB = db
 	} else {
 		return nil, fmt.Errorf("SP_REDIS_DB is not a valid integer")
+	}
+
+	if len(os.Getenv("SP_REDIS_EXPIRATION")) == 0 {
+		log.Println("[-] SP_REDIS_EXPIRATION is not set, defaulting to 60 minutes...")
+		config.redisExpiration = 60 * time.Minute
+	} else if expiration, err := strconv.Atoi(os.Getenv("SP_REDIS_EXPIRATION")); err == nil {
+		config.redisExpiration = time.Duration(expiration) * time.Minute
+	} else {
+		return nil, fmt.Errorf("SP_REDIS_EXPIRATION is not a valid integer")
 	}
 
 	return &config, nil

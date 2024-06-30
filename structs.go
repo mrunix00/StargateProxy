@@ -4,16 +4,18 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 type Configuration struct {
-	listenHostname string
-	listenPort     string
-	redisHostname  string
-	redisPort      string
-	redisUsername  string
-	redisPassword  string
-	redisDB        int
+	listenHostname  string
+	listenPort      string
+	redisHostname   string
+	redisPort       string
+	redisUsername   string
+	redisPassword   string
+	redisDB         int
+	redisExpiration time.Duration
 }
 
 type CachedResponse struct {

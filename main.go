@@ -43,7 +43,7 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request) {
 	forwardData(srcConn, destConn)
 }
 
-func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context) {
+func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context, config Configuration) {
 	transport := http.DefaultTransport
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
@@ -77,22 +77,22 @@ func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx
 		ctx,
 		req.Method+":"+req.Host+":"+req.URL.Path,
 		CachedResponse{resp.StatusCode, w.Header(), body},
-		0).Err()
+		config.redisExpiration).Err()
 	if err != nil {
 		log.Println("[-] Failed caching response Body:", err.Error())
 	}
 }
 
-func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context) {
+func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, ctx context.Context, config Configuration) {
 	val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
 	if err != nil {
-		handleHttp(w, req, rdb, ctx)
+		handleHttp(w, req, rdb, ctx, config)
 		return
 	}
 	response, err := bytesToCachedResponse([]byte(val))
 	if err != nil {
 		log.Println("[-] Failed to parse cached response:", err.Error())
-		handleHttp(w, req, rdb, ctx)
+		handleHttp(w, req, rdb, ctx, config)
 		return
 	}
 	copyHeader(w.Header(), response.Headers)
@@ -121,10 +121,10 @@ func startProxy(config Configuration) {
 				handleHttpsTunneling(w, r)
 				return
 			case http.MethodGet:
-				handleCachedHttp(w, r, rdb, ctx)
+				handleCachedHttp(w, r, rdb, ctx, config)
 				return
 			default:
-				handleHttp(w, r, rdb, ctx)
+				handleHttp(w, r, rdb, ctx, config)
 			}
 		}),
 		TLSConfig: nil,

@@ -261,10 +261,15 @@ func startProxy(config Configuration) {
 		Addr: hostAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Println("[*] Received connection from:", r.RemoteAddr)
-			if http.MethodConnect == r.Method {
+			switch r.Method {
+			case http.MethodConnect:
 				handleHttpsTunneling(w, r)
-			} else {
+				return
+			case http.MethodGet:
 				handleCachedHttp(w, r, rdb, ctx)
+				return
+			default:
+				handleHttp(w, r, rdb, ctx)
 			}
 		}),
 		TLSConfig: nil,

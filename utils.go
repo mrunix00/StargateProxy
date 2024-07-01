@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -58,6 +59,20 @@ func getConfiguration() (*Configuration, error) {
 	} else {
 		return nil, fmt.Errorf("SP_REDIS_EXPIRATION is not a valid integer")
 	}
+
+	certFilePath := os.Getenv("SP_CERT_FILE")
+	keyFilePath := os.Getenv("SP_KEY_FILE")
+	if len(certFilePath) == 0 {
+		return nil, fmt.Errorf("SP_CERT_FILE environment variable is not set")
+	}
+	if len(keyFilePath) == 0 {
+		return nil, fmt.Errorf("SP_KEY_FILE environment variable is not set")
+	}
+	cert, err := tls.LoadX509KeyPair(certFilePath, keyFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load certificate and/or key: %s", err.Error())
+	}
+	config.cert = &cert
 
 	return &config, nil
 }

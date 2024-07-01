@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
@@ -16,6 +17,7 @@ type Configuration struct {
 	redisPassword   string
 	redisDB         int
 	redisExpiration time.Duration
+	cert            *tls.Certificate
 }
 
 type CachedResponse struct {

@@ -31,19 +31,11 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request, rdb *redis.Cli
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	}
 
-	// Load the certificates
-	// TODO: Load the certificates from the configuration
-	cert, err := tls.LoadX509KeyPair("/home/mrunix/myCA.pem", "/home/mrunix/myCA.key")
-	if err != nil {
-		http.Error(w, "Failed to load certificates", http.StatusInternalServerError)
-		return
-	}
-
 	// Create a TLS connection
 	clientTLSConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
+		Certificates: []tls.Certificate{*config.cert},
 		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return &cert, nil
+			return config.cert, nil
 		},
 		InsecureSkipVerify: true,
 	}

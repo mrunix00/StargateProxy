@@ -16,33 +16,30 @@ import (
 
 var ctx = context.Background()
 
-func handleHttpsCachedTunneling(w http.ResponseWriter, r *http.Request, rdb *redis.Client, config Configuration) {
+func handleHttpsTunneling(w http.ResponseWriter, r *http.Request, rdb *redis.Client, config Configuration) {
 	log.Println("[*] Tunneling to:", r.Host)
-	destConn, err := net.Dial("tcp", r.Host)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		log.Println("[-]", err.Error())
-		return
-	}
 	w.WriteHeader(http.StatusOK)
 
+	// Hijack the connection to the client
 	hijacker, allowed := w.(http.Hijacker)
 	if !allowed {
 		http.Error(w, "HTTP/1.1 400 Internal Server Error", http.StatusInternalServerError)
 		return
 	}
-
 	srcConn, _, err := hijacker.Hijack()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	}
 
+	// Load the certificates
+	// TODO: Load the certificates from the configuration
 	cert, err := tls.LoadX509KeyPair("/home/mrunix/myCA.pem", "/home/mrunix/myCA.key")
 	if err != nil {
 		http.Error(w, "Failed to load certificates", http.StatusInternalServerError)
 		return
 	}
 
+	// Create a TLS connection
 	clientTLSConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -57,53 +54,50 @@ func handleHttpsCachedTunneling(w http.ResponseWriter, r *http.Request, rdb *red
 			log.Println("[-] Failed closing clientTLSConn:", err.Error())
 		}
 	}(clientTLSConn)
-
 	err = clientTLSConn.Handshake()
 	if err != nil {
 		http.Error(w, "TLS handshake failed", http.StatusInternalServerError)
 		return
 	}
 
-	serverTLSConfig := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	serverTLSConn := tls.Client(destConn, serverTLSConfig)
-	defer func(serverTLSConn *tls.Conn) {
-		err := serverTLSConn.Close()
-		if err != nil {
-			log.Println("[-] Failed closing serverTLSConn:", err.Error())
-		}
-	}(serverTLSConn)
-
-	err = serverTLSConn.Handshake()
-	if err != nil {
-		http.Error(w, "TLS handshake with target server failed", http.StatusInternalServerError)
-		return
-	}
-
+	// Read the request from the client
 	reader := bufio.NewReader(clientTLSConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
+		log.Println("[-] Failed reading request:", err.Error())
 		http.Error(w, "Failed to read request", http.StatusInternalServerError)
 		return
 	}
 
-	cacheKey := req.Method + ":" + req.Host + ":" + req.URL.Path
-	val, err := rdb.Get(ctx, cacheKey).Result()
-	if err == nil {
-		_, err := clientTLSConn.Write([]byte(val))
-		if err != nil {
-			log.Println("[-] Failed writing cached response:", err.Error())
+	// if the request is a GET request, check if it is cached in Redis
+	// and return the cached response if it is
+	if req.Method == http.MethodGet {
+		val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
+		if err == nil {
+			log.Println("[*] Cache hit:", req.Host+req.URL.Path)
+			_, err := clientTLSConn.Write([]byte(val))
+			if err != nil {
+				log.Println("[-] Failed writing cached response:", err.Error())
+			}
+			return
 		}
-		return
+		log.Println("[*] Cache miss:", req.URL.Host+req.URL.Path)
 	}
 
+	// Forward the request to the target server
 	req.URL = &url.URL{
 		Scheme: "https",
 		Host:   req.Host,
 		Path:   req.URL.Path,
 	}
 	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -115,27 +109,35 @@ func handleHttpsCachedTunneling(w http.ResponseWriter, r *http.Request, rdb *red
 		}
 	}(resp.Body)
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	buffer := &strings.Builder{}
+	// Write the response status line
 	_, err = buffer.Write([]byte(fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))))
 	if err != nil {
 		log.Println("[-] Failed writing response status line:", err.Error())
 		return
 	}
+
+	// Write the response headers
 	for k, v := range resp.Header {
 		for _, vv := range v {
 			buffer.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, vv)))
 		}
 	}
+
 	buffer.Write([]byte("\r\n"))
 	buffer.Write(body)
-	clientTLSConn.Write([]byte(buffer.String()))
-	rdb.Set(ctx, cacheKey, []byte(buffer.String()), config.redisExpiration)
+
+	// Write the response to the client
+	_, err = clientTLSConn.Write([]byte(buffer.String()))
+	if err != nil {
+		log.Println("[-] Failed writing response:", err.Error())
+		return
+	}
+
+	// If the request is a GET request, cache the response
+	if req.Method == http.MethodGet {
+		rdb.Set(ctx, req.Method+":"+req.Host+":"+req.URL.Path, []byte(buffer.String()), config.redisExpiration)
+	}
 }
 
 func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, config Configuration) {
@@ -215,7 +217,7 @@ func startProxy(config Configuration) {
 			log.Println("[*] Received connection from:", r.RemoteAddr)
 			switch r.Method {
 			case http.MethodConnect:
-				handleHttpsCachedTunneling(w, r, rdb, config)
+				handleHttpsTunneling(w, r, rdb, config)
 				return
 			case http.MethodGet:
 				handleCachedHttp(w, r, rdb, config)

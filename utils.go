@@ -1,19 +1,27 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+type Configuration struct {
+	listenHostname  string
+	listenPort      string
+	redisHostname   string
+	redisPort       string
+	redisUsername   string
+	redisPassword   string
+	redisDB         int
+	redisExpiration time.Duration
+	cert            *tls.Certificate
+}
 
 func getConfiguration() (*Configuration, error) {
 	var config Configuration
@@ -77,65 +85,18 @@ func getConfiguration() (*Configuration, error) {
 	return &config, nil
 }
 
-func forwardData(dst, src net.Conn) {
-	_, err := io.Copy(dst, src)
-	if err != nil {
-		log.Println("[-] Forwarding data failure: ", err.Error())
-	}
-}
-
-func parseHeaders(headerBytes []byte) http.Header {
-	headers := http.Header{}
-	scanner := bufio.NewScanner(bytes.NewReader(headerBytes))
-	for scanner.Scan() {
-		line := scanner.Text()
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			headers.Add(key, value)
+func copyHeader(dst *strings.Builder, src http.Header) {
+	for k, v := range src {
+		for _, vv := range v {
+			dst.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, vv)))
 		}
 	}
-	return headers
 }
 
-func bytesToCachedResponse(data []byte) (CachedResponse, error) {
-	// Split headers and body
-	parts := bytes.SplitN(data, []byte("\r\n\r\n"), 2)
-	if len(parts) != 2 {
-		return CachedResponse{}, fmt.Errorf("invalid format")
-	}
-
-	// Split status line and headers
-	headerParts := bytes.SplitN(parts[0], []byte("\r\n"), 2)
-	if len(headerParts) != 2 {
-		return CachedResponse{}, fmt.Errorf("invalid header format")
-	}
-
-	// Parse status line
-	statusLine := string(headerParts[0])
-	statusFields := strings.Fields(statusLine)
-	if len(statusFields) < 2 {
-		return CachedResponse{}, fmt.Errorf("invalid status line")
-	}
-	statusCode, err := strconv.Atoi(statusFields[1])
-	if err != nil {
-		return CachedResponse{}, fmt.Errorf("invalid status code")
-	}
-
-	headers := parseHeaders(headerParts[1])
-	body := parts[1]
-	return CachedResponse{
-		StatusCode: statusCode,
-		Headers:    headers,
-		Body:       body,
-	}, nil
+func getRedisKey(req *http.Request) string {
+	return req.Method + ":" + req.Host + ":" + req.URL.Path
 }
 
-func copyHeader(dst, src http.Header) {
-	for k, vv := range src {
-		for _, v := range vv {
-			dst.Add(k, v)
-		}
-	}
+func getResponseStatusLine(statusCode int) []byte {
+	return []byte(fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode)))
 }

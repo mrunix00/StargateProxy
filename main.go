@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"fmt"
 	"github.com/redis/go-redis/v9"
 	"io"
 	"log"
@@ -64,7 +63,7 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request, rdb *redis.Cli
 	// if the request is a GET request, check if it is cached in Redis
 	// and return the cached response if it is
 	if req.Method == http.MethodGet {
-		val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
+		val, err := rdb.Get(ctx, getRedisKey(req)).Result()
 		if err == nil {
 			log.Println("[*] Cache hit:", req.Host+req.URL.Path)
 			_, err := clientTLSConn.Write([]byte(val))
@@ -102,20 +101,8 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request, rdb *redis.Cli
 	}(resp.Body)
 
 	buffer := &strings.Builder{}
-	// Write the response status line
-	_, err = buffer.Write([]byte(fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))))
-	if err != nil {
-		log.Println("[-] Failed writing response status line:", err.Error())
-		return
-	}
-
-	// Write the response headers
-	for k, v := range resp.Header {
-		for _, vv := range v {
-			buffer.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, vv)))
-		}
-	}
-
+	buffer.Write(getResponseStatusLine(resp.StatusCode))
+	copyHeader(buffer, resp.Header)
 	buffer.Write([]byte("\r\n"))
 	buffer.Write(body)
 
@@ -128,14 +115,13 @@ func handleHttpsTunneling(w http.ResponseWriter, r *http.Request, rdb *redis.Cli
 
 	// If the request is a GET request, cache the response
 	if req.Method == http.MethodGet {
-		rdb.Set(ctx, req.Method+":"+req.Host+":"+req.URL.Path, []byte(buffer.String()), config.redisExpiration)
+		rdb.Set(ctx, getRedisKey(req), []byte(buffer.String()), config.redisExpiration)
 	}
 }
 
 func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, config Configuration) {
 	log.Println("[*] Fetching from upstream:", req.URL)
-	transport := http.DefaultTransport
-	resp, err := transport.RoundTrip(req)
+	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -147,49 +133,39 @@ func handleHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, con
 		}
 	}(resp.Body)
 
-	copyHeader(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-
+	buffer := &strings.Builder{}
+	buffer.Write(getResponseStatusLine(resp.StatusCode))
+	copyHeader(buffer, resp.Header)
+	buffer.Write([]byte("\r\n"))
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Println("[-] Failed reading response Body:", err.Error())
 		return
 	}
+	buffer.Write(body)
 
-	_, err = w.Write(body)
+	_, err = w.Write([]byte(buffer.String()))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		log.Println("[-] Failed copying response Body:", err.Error())
 		return
 	}
 
-	err = rdb.Set(
-		ctx,
-		req.Method+":"+req.Host+":"+req.URL.Path,
-		CachedResponse{resp.StatusCode, w.Header(), body},
-		config.redisExpiration).Err()
+	err = rdb.Set(ctx, getRedisKey(req), []byte(buffer.String()), config.redisExpiration).Err()
 	if err != nil {
 		log.Println("[-] Failed caching response Body:", err.Error())
 	}
 }
 
 func handleCachedHttp(w http.ResponseWriter, req *http.Request, rdb *redis.Client, config Configuration) {
-	val, err := rdb.Get(ctx, req.Method+":"+req.Host+":"+req.URL.Path).Result()
+	val, err := rdb.Get(ctx, getRedisKey(req)).Result()
 	if err != nil {
 		log.Println("[-] Cache miss:", err.Error())
 		handleHttp(w, req, rdb, config)
 		return
 	}
 	log.Println("[*] Cache hit:", req.URL)
-	response, err := bytesToCachedResponse([]byte(val))
-	if err != nil {
-		log.Println("[-] Failed to parse cached response:", err.Error())
-		handleHttp(w, req, rdb, config)
-		return
-	}
-	copyHeader(w.Header(), response.Headers)
-	w.WriteHeader(response.StatusCode)
-	_, err = w.Write(response.Body)
+	_, err = w.Write([]byte(val))
 	if err != nil {
 		log.Println("[-] Failed writing cached response:", err.Error())
 	}

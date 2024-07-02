@@ -32,6 +32,10 @@ func getConfiguration() (*Configuration, error) {
 	config.redisUsername = os.Getenv("SP_REDIS_USERNAME")
 	config.redisPassword = os.Getenv("SP_REDIS_PASSWORD")
 
+	if len(config.listenHostname) == 0 {
+		log.Println("[-] SP_HOSTNAME is not set, defaulting to localhost...")
+		config.listenHostname = "localhost"
+	}
 	if len(config.listenPort) == 0 {
 		return nil, fmt.Errorf("SP_PORT environment variable is not set")
 	}
@@ -41,7 +45,7 @@ func getConfiguration() (*Configuration, error) {
 
 	if len(config.redisHostname) == 0 {
 		log.Println("[-] SP_REDIS_HOSTNAME is not set, defaulting to localhost...")
-		config.listenHostname = "localhost"
+		config.redisHostname = "localhost"
 	}
 	if len(config.redisPort) == 0 {
 		log.Println("[-] SP_REDIS_PORT is not set, defaulting to :6379...")

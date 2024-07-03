@@ -40,3 +40,7 @@ services:
     ports:
       - 6379:6379
 ```
+5. Launch the server:
+```bash
+docker compose up
+```
